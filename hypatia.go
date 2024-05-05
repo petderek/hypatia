@@ -2,9 +2,14 @@ package hypatia
 
 import "net/http"
 
-type TaskProtec struct {
+type TPEndpoint struct {
+	tpc       TaskProtectionClient
+	Writeable bool
 }
 
-func (tp *TaskProtec) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+func (tp *TPEndpoint) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 
+}
+
+type LocalHealthEndpoint struct {
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,6 +52,7 @@ func (tpc *TaskProtectionClient) Put(request *TaskProtectionRequest) (*Protectio
 	if err != nil {
 		return nil, err
 	}
+	log.Println("req body: ", string(body))
 	return tpc.doRequest(http.MethodPut, bytes.NewReader(body))
 }
 
@@ -73,22 +75,23 @@ func (tpc *TaskProtectionClient) doRequest(method string, body io.Reader) (*Prot
 	if err != nil {
 		return nil, err
 	}
+	log.Println("res body: ", string(raw))
 	var tpr TaskProtectionResponse
 	err = json.Unmarshal(raw, &tpr)
 	if err != nil {
 		return nil, err
 	}
-	if tpr.Protection == nil && tpr.Protection.TaskArn != nil && *tpr.Protection.TaskArn != "" {
+	if tpr.Protection != nil && tpr.Protection.TaskArn != nil && *tpr.Protection.TaskArn != "" {
 		return tpr.Protection, nil
 	}
 	return nil, errors.New("unable to decipher response: " + string(raw))
 }
 
 type TaskProtectionResponse struct {
-	RequestID  *string
-	Protection *Protection
-	Failure    *TaskProtectionFailure
-	Error      *TaskProtectionError
+	RequestID  *string                `json:"requestID,omitempty"`
+	Protection *Protection            `json:"protection,omitempty"`
+	Failure    *TaskProtectionFailure `json:"failure,omitempty"`
+	Error      *TaskProtectionError   `json:"error,omitempty"`
 }
 
 type TaskProtectionRequest struct {
