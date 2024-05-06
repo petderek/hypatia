@@ -11,3 +11,5 @@ RUN go build -o /bin/healthcheck /src/hypatia/cmd/healthcheck
 FROM public.ecr.aws/nginx/nginx as stager
 COPY --from=builder /bin/protec /bin/protec
 COPY --from=builder /bin/healthcheck /bin/healthcheck
+RUN touch localhealth.status
+RUN touch remotehealth.status
