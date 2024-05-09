@@ -10,12 +10,8 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"time"
 )
-
-type TaskProtection interface {
-	Get() (*Protection, error)
-	Put(enabled bool, minutes *int) (*Protection, error)
-}
 
 type TaskProtectionClient struct {
 	Location *url.URL
@@ -47,7 +43,11 @@ func (tpc *TaskProtectionClient) Get() (*Protection, error) {
 	return tpc.doRequest(http.MethodGet, nil)
 }
 
-func (tpc *TaskProtectionClient) Put(request *TaskProtectionRequest) (*Protection, error) {
+func (tpc *TaskProtectionClient) Put(protect bool, min *int) (*Protection, error) {
+	request := &TaskProtectionRequest{
+		ProtectionEnabled: &protect,
+		ExpiresInMinutes:  min,
+	}
 	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
@@ -115,4 +115,21 @@ type TaskProtectionError struct {
 	Arn     *string
 	Code    *string
 	Message *string
+}
+
+type TaskProtectionStub struct {
+	*Protection
+}
+
+func (t *TaskProtectionStub) Get() (*Protection, error) {
+	return t.Protection, nil
+}
+
+func (t *TaskProtectionStub) Put(enabled bool, minutes *int) (*Protection, error) {
+	t.ProtectionEnabled = &enabled
+	if minutes != nil && *minutes > 0 {
+		next := time.Now().Add(time.Minute * time.Duration(*minutes)).String()
+		t.ExpirationDate = &next
+	}
+	return t.Protection, nil
 }
