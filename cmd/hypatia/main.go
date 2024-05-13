@@ -13,6 +13,8 @@ func main() {
 	remotefile := flag.String("remote", "remote.status", "remote file healthcheck")
 	address := flag.String("a", ":8000", "address to listen on")
 	shouldStub := flag.Bool("stub", false, "should stub task protection endpoint")
+	serviceName := flag.String("service", "", "the ecs service name to use")
+	clusterName := flag.String("cluster", "", "the ecs cluster name to use")
 	writable := flag.Bool("w", true, "accepts post requests")
 	flag.Parse()
 	var tpClient hypatia.TaskProtectionIface
@@ -26,11 +28,19 @@ func main() {
 		tpClient = &hypatia.TaskProtectionClient{}
 	}
 	log.Println("starting server")
-	srv := &hypatia.HypatiaServer{
-		Protection:   tpClient,
-		LocalHealth:  hypatia.FileHealthcheck{Filepath: *localfile},
-		RemoteHealth: hypatia.FileHealthcheck{Filepath: *remotefile},
-		Writeable:    *writable,
+	sd := &hypatia.ServiceDiscovery{}
+	if *serviceName != "" {
+		sd.ServiceName = *serviceName
+	}
+	if *clusterName != "" {
+		sd.ClusterName = *clusterName
+	}
+	srv := &hypatia.Server{
+		Protection:       tpClient,
+		LocalHealth:      hypatia.FileHealthcheck{Filepath: *localfile},
+		RemoteHealth:     hypatia.FileHealthcheck{Filepath: *remotefile},
+		ServiceDiscovery: sd,
+		Writeable:        *writable,
 	}
 	http.ListenAndServe(*address, srv)
 }

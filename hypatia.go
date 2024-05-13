@@ -14,26 +14,32 @@ type TaskProtectionIface interface {
 	Put(enabled bool, minutes *int) (*Protection, error)
 }
 
-type HypatiaServer struct {
-	Protection   TaskProtectionIface
-	LocalHealth  FileHealthcheck
-	RemoteHealth FileHealthcheck
-	Writeable    bool
+type Server struct {
+	Protection       TaskProtectionIface
+	LocalHealth      FileHealthcheck
+	RemoteHealth     FileHealthcheck
+	ServiceDiscovery *ServiceDiscovery
+	Writeable        bool
 }
 
-type HypatiaData struct {
-	TaskArn               *string  `json:"taskArn,omitempty"`
-	TaskProtectionEnabled *bool    `json:"taskProtectionEnabled,omitempty"`
-	TaskProtectionExpiry  *string  `json:"taskProtectionExpiry,omitempty"`
-	SetLocalHealth        *bool    `json:"setLocalHealth,omitempty"`
-	SetRemoteHealth       *bool    `json:"setRemoteHealth,omitempty"`
-	LocalHealth           *string  `json:"localHealth,omitempty"`
-	RemoteHealth          *string  `json:"remoteHealth,omitempty"`
-	ExpiresInMinutes      *int     `json:"expiresInMinutes,omitempty"`
-	Errors                []string `json:"errors,omitempty"`
+type Neighbor struct {
+	TaskArn *string `json:"taskArn,omitempty"`
+	Address *string `json:"address,omitempty"`
+}
+type RequestResponse struct {
+	TaskArn               *string    `json:"taskArn,omitempty"`
+	TaskProtectionEnabled *bool      `json:"taskProtectionEnabled,omitempty"`
+	TaskProtectionExpiry  *string    `json:"taskProtectionExpiry,omitempty"`
+	SetLocalHealth        *bool      `json:"setLocalHealth,omitempty"`
+	SetRemoteHealth       *bool      `json:"setRemoteHealth,omitempty"`
+	LocalHealth           *string    `json:"localHealth,omitempty"`
+	RemoteHealth          *string    `json:"remoteHealth,omitempty"`
+	ExpiresInMinutes      *int       `json:"expiresInMinutes,omitempty"`
+	Neighbors             []Neighbor `json:"neighbors,omitempty"`
+	Errors                []string   `json:"errors,omitempty"`
 }
 
-func (hs *HypatiaServer) ServePing(res http.ResponseWriter, _ *http.Request) {
+func (hs *Server) ServePing(res http.ResponseWriter, _ *http.Request) {
 	var message []byte
 	if err := hs.RemoteHealth.GetHealth(); err != nil {
 		res.WriteHeader(http.StatusInternalServerError)
@@ -44,14 +50,47 @@ func (hs *HypatiaServer) ServePing(res http.ResponseWriter, _ *http.Request) {
 	writeResponse(res, message)
 }
 
-func (hs *HypatiaServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+func (hs *Server) ServeNeighbors(res http.ResponseWriter, _ *http.Request) {
+	var output RequestResponse
+	if hs.ServiceDiscovery == nil {
+		log.Println("no sd configured")
+		handleISE(res)
+		return
+	}
+	services, err := hs.ServiceDiscovery.GetServiceMap()
+	if err != nil {
+		log.Println("unable to get sd data: ", err)
+		handleISE(res)
+		return
+	}
+	for k, v := range services.Tasks {
+		output.Neighbors = append(output.Neighbors, Neighbor{
+			TaskArn: aws.String(k),
+			Address: aws.String(v.String()),
+		})
+	}
+	data, err := json.Marshal(&output)
+	if err != nil {
+		log.Println("unable to json things: ", err)
+		handleISE(res)
+		return
+	}
+	writeResponse(res, data)
+}
+
+func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	if isPing(req) {
 		hs.ServePing(res, req)
 		return
 	}
 
+	if isNeighbors(req) {
+		hs.ServeNeighbors(res, req)
+		return
+	}
+
 	var errors []error
-	var output HypatiaData
+	var output RequestResponse
 
 	switch req.Method {
 	case http.MethodPost:
@@ -60,7 +99,7 @@ func (hs *HypatiaServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			handleUnauth(res)
 			return
 		}
-		var input HypatiaData
+		var input RequestResponse
 		processed, err := io.ReadAll(req.Body)
 		if err != nil {
 			res.WriteHeader(http.StatusBadRequest)
@@ -132,6 +171,10 @@ func (hs *HypatiaServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 	writeResponse(res, data)
 	return
+}
+
+func isNeighbors(req *http.Request) bool {
+	return strings.EqualFold(req.URL.Path, "/neighbors")
 }
 
 func isPing(req *http.Request) bool {

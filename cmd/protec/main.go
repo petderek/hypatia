@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/petderek/hypatia"
 	"io"
 	"log"
@@ -33,14 +32,9 @@ func main() {
 		if *flagMinutes != 0 {
 			minutes = flagMinutes
 		}
-		protection, err = tp.Put(&hypatia.TaskProtectionRequest{
-			ProtectionEnabled: aws.Bool(true),
-			ExpiresInMinutes:  minutes,
-		})
+		protection, err = tp.Put(true, minutes)
 	case "off":
-		protection, err = tp.Put(&hypatia.TaskProtectionRequest{
-			ProtectionEnabled: aws.Bool(false),
-		})
+		protection, err = tp.Put(false, nil)
 	default:
 		protection, err = tp.Get()
 	}

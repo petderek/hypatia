@@ -12,7 +12,7 @@ func TestServe(t *testing.T) {
 			TaskArn: aws.String("arn:aws:ecs:us-west-2:0123456789:task/foo"),
 		},
 	}
-	srv := &HypatiaServer{
+	srv := &Server{
 		Protection:   tpClient,
 		LocalHealth:  FileHealthcheck{Filepath: "local.status"},
 		RemoteHealth: FileHealthcheck{Filepath: "remote.status"},
