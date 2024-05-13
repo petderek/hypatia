@@ -17,22 +17,22 @@ import (
 )
 
 type ServiceMap struct {
-	Tasks              map[string]*url.URL
-	ContainerInstances map[string]string
-	EC2Instances       map[string]string
+	Tasks map[string]*url.URL
 }
 type ServiceDiscovery struct {
-	ServiceName string
-	ClusterName string
-	ECSClient   *ecs.Client
-	EC2Client   *ec2.Client
-	once        sync.Once
-	cache       Cache
+	ServiceName                         string
+	ClusterName                         string
+	ECSClient                           *ecs.Client
+	EC2Client                           *ec2.Client
+	once                                sync.Once
+	containerInstanceArnToEC2InstanceId Cache
+	ec2InstancesToAddress               Cache
 }
 
 func (sd *ServiceDiscovery) initSD() {
 	sd.once.Do(func() {
-		sd.cache = NewCache(512)
+		sd.containerInstanceArnToEC2InstanceId = NewCache(512)
+		sd.ec2InstancesToAddress = NewCache(512)
 		if sd.ECSClient == nil {
 			cfg, err := config.LoadDefaultConfig(context.Background())
 			if err != nil {
@@ -105,65 +105,83 @@ func (sd *ServiceDiscovery) GetServiceMap() (*ServiceMap, error) {
 		return nil, err
 	}
 
-	containerInstanceArnToEC2InstanceId := make(map[string]string)
+	/*containerInstanceArnToEC2InstanceId := make(map[string]string)
 	for _, task := range taskDetails.Tasks {
 		containerInstanceArnToEC2InstanceId[*task.ContainerInstanceArn] = ""
-	}
+		if s, ok := sd.containerInstanceArnToEC2InstanceId.Get(*task.ContainerInstanceArn); ok {
+			containerInstanceArnToEC2InstanceId[*task.ContainerInstanceArn] = s
+		}
+	}*/
 
-	var containerInstances []string
-	for k, _ := range containerInstanceArnToEC2InstanceId {
-		containerInstances = append(containerInstances, k)
+	var unknownInstanceMap = map[string]string{}
+	for _, task := range taskDetails.Tasks {
+		if _, ok := sd.containerInstanceArnToEC2InstanceId.Get(*task.ContainerInstanceArn); !ok {
+			unknownInstanceMap[*task.ContainerInstanceArn] = ""
+		}
 	}
+	var unknownInstanceList []string
+	for k, _ := range unknownInstanceMap {
+		unknownInstanceList = append(unknownInstanceList, k)
+	}
+	if len(unknownInstanceList) > 0 {
+		ecsInstanceDetails, err := sd.ECSClient.DescribeContainerInstances(context.Background(),
+			&ecs.DescribeContainerInstancesInput{
+				ContainerInstances: unknownInstanceList,
+				Cluster:            &sd.ClusterName,
+			})
+		if err != nil {
+			return nil, err
+		}
+		if len(ecsInstanceDetails.ContainerInstances) < 1 {
+			return nil, fmt.Errorf("no container instances returned")
+		}
 
-	ecsInstanceDetails, err := sd.ECSClient.DescribeContainerInstances(context.Background(),
-		&ecs.DescribeContainerInstancesInput{
-			ContainerInstances: containerInstances,
-			Cluster:            &sd.ClusterName,
+		for _, instance := range ecsInstanceDetails.ContainerInstances {
+			sd.containerInstanceArnToEC2InstanceId.Put(*instance.ContainerInstanceArn, *instance.Ec2InstanceId)
+		}
+	}
+	var unknownEc2 []string
+	for _, task := range taskDetails.Tasks {
+		arn := *task.ContainerInstanceArn
+		ec2Id, ok := sd.containerInstanceArnToEC2InstanceId.Get(arn)
+		if !ok {
+			log.Println("error. skipping id:  ", ec2Id)
+			continue
+		}
+		if _, ok := sd.ec2InstancesToAddress.Get(ec2Id); !ok {
+			unknownEc2 = append(unknownEc2, ec2Id)
+		}
+	}
+	if len(unknownEc2) > 0 {
+		ec2ClientDetails, err := sd.EC2Client.DescribeInstances(context.Background(), &ec2.DescribeInstancesInput{
+			InstanceIds: unknownEc2,
 		})
-	if err != nil {
-		return nil, err
-	}
-	if len(ecsInstanceDetails.ContainerInstances) < 1 {
-		return nil, fmt.Errorf("no container instances returned")
-	}
+		if err != nil {
+			return nil, err
+		}
+		if len(ec2ClientDetails.Reservations) < 1 {
+			return nil, fmt.Errorf("no ec2 reservations found")
+		}
 
-	var ec2InstanceIds []string
-	for _, instance := range ecsInstanceDetails.ContainerInstances {
-		containerInstanceArnToEC2InstanceId[*instance.ContainerInstanceArn] = *instance.Ec2InstanceId
-		ec2InstanceIds = append(ec2InstanceIds, *instance.Ec2InstanceId)
-	}
-
-	ec2ClientDetails, err := sd.EC2Client.DescribeInstances(context.Background(), &ec2.DescribeInstancesInput{
-		InstanceIds: ec2InstanceIds,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(ec2ClientDetails.Reservations) < 1 {
-		return nil, fmt.Errorf("no ec2 reservations found")
-	}
-
-	ec2InstancesToAddress := make(map[string]string)
-	for _, reservation := range ec2ClientDetails.Reservations {
-		for _, instance := range reservation.Instances {
-			ec2InstancesToAddress[*instance.InstanceId] = *instance.PrivateIpAddress
+		for _, reservation := range ec2ClientDetails.Reservations {
+			for _, instance := range reservation.Instances {
+				sd.ec2InstancesToAddress.Put(*instance.InstanceId, *instance.PrivateIpAddress)
+			}
 		}
 	}
 
 	services := &ServiceMap{}
 	services.Tasks = make(map[string]*url.URL, len(taskDetails.Tasks))
-	services.ContainerInstances = containerInstanceArnToEC2InstanceId
-	services.EC2Instances = ec2InstancesToAddress
 	for _, task := range taskDetails.Tasks {
-		if task.LastStatus == nil || *task.LastStatus != "RUNNING" || len(task.Containers) < 1 || len(task.Containers[0].NetworkBindings) < 1 {
+		if task.LastStatus == nil || len(task.Containers) < 1 || len(task.Containers[0].NetworkBindings) < 1 {
 			continue
 		}
 		nb := task.Containers[0].NetworkBindings[0]
 		ip := "<nil>"
 		port := "<nil>"
-		if ec2Id, ok := containerInstanceArnToEC2InstanceId[*task.ContainerInstanceArn]; ok {
+		if ec2Id, ok := sd.containerInstanceArnToEC2InstanceId.Get(*task.ContainerInstanceArn); ok {
 			ip = "<resolvedEC2>"
-			if addr, ok := ec2InstancesToAddress[ec2Id]; ok {
+			if addr, ok := sd.ec2InstancesToAddress.Get(ec2Id); ok {
 				ip = addr
 			}
 		}
