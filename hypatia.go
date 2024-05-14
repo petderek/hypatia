@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 )
 
@@ -37,6 +39,37 @@ type RequestResponse struct {
 	ExpiresInMinutes      *int       `json:"expiresInMinutes,omitempty"`
 	Neighbors             []Neighbor `json:"neighbors,omitempty"`
 	Errors                []string   `json:"errors,omitempty"`
+}
+
+func (hs *Server) ServeProxy(res http.ResponseWriter, req *http.Request) {
+	rp := httputil.ReverseProxy{
+		Rewrite:       hs.rewrite,
+		FlushInterval: 0,
+	}
+	rp.ServeHTTP(res, req)
+}
+
+func (hs *Server) rewrite(req *httputil.ProxyRequest) {
+	req.SetXForwarded()
+	u := &url.URL{}
+	u.Path = strings.Replace(req.In.URL.Path, "task", "hypatia", 1)
+	paths := strings.SplitAfter(u.Path, "/")
+	taskArn := paths[len(paths)-1]
+
+	services, err := hs.ServiceDiscovery.GetServiceMap()
+	if err != nil {
+		// todo
+		log.Println("error on proxy: ", err)
+	}
+	addr, ok := services.Tasks[taskArn]
+	if !ok {
+		//todo
+		log.Println("thing not found: ", taskArn)
+	} else {
+		u.Scheme = addr.Scheme
+		u.Host = addr.Host
+	}
+	req.SetURL(u)
 }
 
 func (hs *Server) ServePing(res http.ResponseWriter, _ *http.Request) {
@@ -79,6 +112,11 @@ func (hs *Server) ServeNeighbors(res http.ResponseWriter, _ *http.Request) {
 }
 
 func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if isProxy(req) {
+		hs.ServeProxy(res, req)
+		return
+	}
+
 	if isPing(req) {
 		hs.ServePing(res, req)
 		return
@@ -186,6 +224,10 @@ func isPing(req *http.Request) bool {
 		}
 	}
 	return found
+}
+
+func isProxy(req *http.Request) bool {
+	return strings.HasPrefix(req.URL.Path, "/task")
 }
 
 func handleUnauth(res http.ResponseWriter) {
