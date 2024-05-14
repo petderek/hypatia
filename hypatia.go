@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 type TaskProtectionIface interface {
@@ -22,6 +23,8 @@ type Server struct {
 	RemoteHealth     FileHealthcheck
 	ServiceDiscovery *ServiceDiscovery
 	Writeable        bool
+	proxy            *httputil.ReverseProxy
+	once             sync.Once
 }
 
 type Neighbor struct {
@@ -29,31 +32,33 @@ type Neighbor struct {
 	Address *string `json:"address,omitempty"`
 }
 type RequestResponse struct {
-	TaskArn               *string    `json:"taskArn,omitempty"`
-	TaskProtectionEnabled *bool      `json:"taskProtectionEnabled,omitempty"`
-	TaskProtectionExpiry  *string    `json:"taskProtectionExpiry,omitempty"`
-	SetLocalHealth        *bool      `json:"setLocalHealth,omitempty"`
-	SetRemoteHealth       *bool      `json:"setRemoteHealth,omitempty"`
-	LocalHealth           *string    `json:"localHealth,omitempty"`
-	RemoteHealth          *string    `json:"remoteHealth,omitempty"`
-	ExpiresInMinutes      *int       `json:"expiresInMinutes,omitempty"`
-	Neighbors             []Neighbor `json:"neighbors,omitempty"`
-	Errors                []string   `json:"errors,omitempty"`
+	TaskArn               *string  `json:"taskArn,omitempty"`
+	TaskProtectionEnabled *bool    `json:"taskProtectionEnabled,omitempty"`
+	TaskProtectionExpiry  *string  `json:"taskProtectionExpiry,omitempty"`
+	SetLocalHealth        *bool    `json:"setLocalHealth,omitempty"`
+	SetRemoteHealth       *bool    `json:"setRemoteHealth,omitempty"`
+	LocalHealth           *string  `json:"localHealth,omitempty"`
+	RemoteHealth          *string  `json:"remoteHealth,omitempty"`
+	ExpiresInMinutes      *int     `json:"expiresInMinutes,omitempty"`
+	Tasks                 []string `json:"tasks,omitempty"`
+	Errors                []string `json:"errors,omitempty"`
 }
 
 func (hs *Server) ServeProxy(res http.ResponseWriter, req *http.Request) {
-	rp := httputil.ReverseProxy{
-		Rewrite:       hs.rewrite,
-		FlushInterval: 0,
-	}
-	rp.ServeHTTP(res, req)
+	hs.once.Do(func() {
+		hs.proxy = &httputil.ReverseProxy{
+			Rewrite:       hs.rewrite,
+			FlushInterval: 0,
+		}
+	})
+	hs.proxy.ServeHTTP(res, req)
 }
 
 func (hs *Server) rewrite(req *httputil.ProxyRequest) {
 	req.SetXForwarded()
 	u := &url.URL{}
 	u.Path = strings.Replace(req.In.URL.Path, "task", "hypatia", 1)
-	paths := strings.SplitAfter(u.Path, "/")
+	paths := strings.SplitAfter(u.Path, "/hypatia/")
 	taskArn := paths[len(paths)-1]
 
 	services, err := hs.ServiceDiscovery.GetServiceMap()
@@ -96,11 +101,8 @@ func (hs *Server) ServeNeighbors(res http.ResponseWriter, _ *http.Request) {
 		handleISE(res)
 		return
 	}
-	for k, v := range services.Tasks {
-		output.Neighbors = append(output.Neighbors, Neighbor{
-			TaskArn: aws.String(k),
-			Address: aws.String(v.String()),
-		})
+	for k, _ := range services.Tasks {
+		output.Tasks = append(output.Tasks, k)
 	}
 	data, err := json.Marshal(&output)
 	if err != nil {
@@ -112,6 +114,11 @@ func (hs *Server) ServeNeighbors(res http.ResponseWriter, _ *http.Request) {
 }
 
 func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if isTasks(req) {
+		hs.ServeNeighbors(res, req)
+		return
+	}
+
 	if isProxy(req) {
 		hs.ServeProxy(res, req)
 		return
@@ -119,11 +126,6 @@ func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 
 	if isPing(req) {
 		hs.ServePing(res, req)
-		return
-	}
-
-	if isNeighbors(req) {
-		hs.ServeNeighbors(res, req)
 		return
 	}
 
@@ -211,8 +213,8 @@ func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	return
 }
 
-func isNeighbors(req *http.Request) bool {
-	return strings.EqualFold(req.URL.Path, "/neighbors")
+func isTasks(req *http.Request) bool {
+	return strings.EqualFold(req.URL.Path, "/tasks")
 }
 
 func isPing(req *http.Request) bool {

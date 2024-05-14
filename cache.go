@@ -3,6 +3,7 @@ package hypatia
 import (
 	"github.com/aws/smithy-go/container/private/cache"
 	"github.com/aws/smithy-go/container/private/cache/lru"
+	"log"
 	"sync"
 )
 
@@ -27,6 +28,10 @@ func (l *lruStringCache) Get(s string) (string, bool) {
 	l.m.RLock()
 	defer l.m.RUnlock()
 	str, ok := l.smithy.Get(s)
+	if _, converts := str.(string); !converts {
+		log.Println("expected: ", s, "; got ", str)
+		return "", false
+	}
 	return str.(string), ok
 }
 

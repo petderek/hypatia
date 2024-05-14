@@ -2,7 +2,6 @@ package hypatia
 
 import (
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"net/http"
 	"testing"
 )
 
@@ -18,6 +17,5 @@ func TestServe(t *testing.T) {
 		RemoteHealth: FileHealthcheck{Filepath: "remote.status"},
 		Writeable:    true,
 	}
-
-	http.ListenAndServe(":8000", srv)
+	println(srv)
 }
