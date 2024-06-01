@@ -115,6 +115,9 @@ func (sd *ServiceDiscovery) GetServiceMap() (*ServiceMap, error) {
 
 	var unknownInstanceMap = map[string]string{}
 	for _, task := range taskDetails.Tasks {
+		if task.ContainerInstanceArn == nil {
+			continue
+		}
 		if _, ok := sd.containerInstanceArnToEC2InstanceId.Get(*task.ContainerInstanceArn); !ok {
 			unknownInstanceMap[*task.ContainerInstanceArn] = ""
 		}

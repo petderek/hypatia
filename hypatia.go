@@ -1,13 +1,17 @@
 package hypatia
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strings"
 	"sync"
 )
@@ -15,15 +19,22 @@ import (
 type TaskProtectionIface interface {
 	Get() (*Protection, error)
 	Put(enabled bool, minutes *int) (*Protection, error)
+	TaskMetadataIface
+}
+
+type TaskMetadataIface interface {
+	Self() (*TaskMetadata, error)
 }
 
 type Server struct {
 	Protection       TaskProtectionIface
+	Metadata         TaskMetadataIface
 	LocalHealth      FileHealthcheck
 	RemoteHealth     FileHealthcheck
 	ServiceDiscovery *ServiceDiscovery
 	Writeable        bool
 	proxy            *httputil.ReverseProxy
+	imdsClient       *imds.Client
 	once             sync.Once
 }
 
@@ -40,41 +51,49 @@ type RequestResponse struct {
 	LocalHealth           *string  `json:"localHealth,omitempty"`
 	RemoteHealth          *string  `json:"remoteHealth,omitempty"`
 	ExpiresInMinutes      *int     `json:"expiresInMinutes,omitempty"`
+	EC2InstanceId         *string  `json:"ec2Instance,omitempty"`
 	Tasks                 []string `json:"tasks,omitempty"`
 	Errors                []string `json:"errors,omitempty"`
 }
 
-func (hs *Server) ServeProxy(res http.ResponseWriter, req *http.Request) {
+func (hs *Server) initServer() {
 	hs.once.Do(func() {
 		hs.proxy = &httputil.ReverseProxy{
-			Rewrite:       hs.rewrite,
-			FlushInterval: 0,
+			Director: func(req *http.Request) {
+				if err := hs.doRewrite(req); err != nil {
+					log.Println(err)
+				}
+			},
+		}
+		if cfg, err := config.LoadDefaultConfig(context.Background()); err == nil {
+			hs.imdsClient = imds.NewFromConfig(cfg)
+		} else {
+			log.Println("error starting imds: ", err)
 		}
 	})
+}
+
+func (hs *Server) ServeProxy(res http.ResponseWriter, req *http.Request) {
 	hs.proxy.ServeHTTP(res, req)
 }
 
-func (hs *Server) rewrite(req *httputil.ProxyRequest) {
-	req.SetXForwarded()
-	u := &url.URL{}
-	u.Path = strings.Replace(req.In.URL.Path, "task", "hypatia", 1)
-	paths := strings.SplitAfter(u.Path, "/hypatia/")
-	taskArn := paths[len(paths)-1]
-
+func (hs *Server) doRewrite(in *http.Request) error {
+	taskArn := extractArn(in)
+	if taskArn == "" {
+		return fmt.Errorf("unable to extract arn: %s", in.URL)
+	}
 	services, err := hs.ServiceDiscovery.GetServiceMap()
 	if err != nil {
-		// todo
-		log.Println("error on proxy: ", err)
+		return fmt.Errorf("error getting data from proxy: %s", err)
 	}
 	addr, ok := services.Tasks[taskArn]
 	if !ok {
-		//todo
-		log.Println("thing not found: ", taskArn)
+		return fmt.Errorf("address not found in map: %s", taskArn)
 	} else {
-		u.Scheme = addr.Scheme
-		u.Host = addr.Host
+		in.URL.Scheme = addr.Scheme
+		in.URL.Host = addr.Host
 	}
-	req.SetURL(u)
+	return nil
 }
 
 func (hs *Server) ServePing(res http.ResponseWriter, _ *http.Request) {
@@ -114,12 +133,13 @@ func (hs *Server) ServeNeighbors(res http.ResponseWriter, _ *http.Request) {
 }
 
 func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	hs.initServer()
 	if isTasks(req) {
 		hs.ServeNeighbors(res, req)
 		return
 	}
 
-	if isProxy(req) {
+	if hs.isProxy(req) {
 		hs.ServeProxy(res, req)
 		return
 	}
@@ -156,16 +176,23 @@ func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		if input.TaskProtectionEnabled != nil {
 			if _, err := hs.Protection.Put(*input.TaskProtectionEnabled, input.ExpiresInMinutes); err != nil {
 				errors = append(errors, err)
+			} else {
+				output.TaskProtectionEnabled = input.TaskProtectionEnabled
+				output.TaskProtectionEnabled = input.TaskProtectionEnabled
 			}
 		}
 		if input.SetRemoteHealth != nil {
 			if err := hs.RemoteHealth.SetHealth(*input.SetRemoteHealth); err != nil {
 				errors = append(errors, err)
+			} else {
+				output.SetRemoteHealth = input.SetRemoteHealth
 			}
 		}
 		if input.SetLocalHealth != nil {
 			if err := hs.LocalHealth.SetHealth(*input.SetLocalHealth); err != nil {
 				errors = append(errors, err)
+			} else {
+				output.SetLocalHealth = input.SetLocalHealth
 			}
 		}
 	case http.MethodGet:
@@ -176,6 +203,23 @@ func (hs *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			output.TaskArn = protectionStatus.TaskArn
 			output.TaskProtectionExpiry = protectionStatus.ExpirationDate
 			output.TaskProtectionEnabled = protectionStatus.ProtectionEnabled
+		}
+
+		self, selfErr := hs.Metadata.Self()
+		if selfErr != nil {
+			errors = append(errors, selfErr)
+		} else {
+			output.TaskArn = self.TaskARN
+		}
+		if hs.imdsClient != nil {
+			if mt, err := hs.imdsClient.GetInstanceIdentityDocument(context.Background(), &imds.GetInstanceIdentityDocumentInput{}); err == nil {
+				log.Println("setting IMDS: ", mt)
+				output.EC2InstanceId = aws.String(mt.InstanceID)
+			} else {
+				errors = append(errors, err)
+			}
+		} else {
+			log.Println("imds is null DELETE ME")
 		}
 
 		localHealthStatus := hs.LocalHealth.GetHealth()
@@ -228,8 +272,46 @@ func isPing(req *http.Request) bool {
 	return found
 }
 
-func isProxy(req *http.Request) bool {
-	return strings.HasPrefix(req.URL.Path, "/task")
+func extractArn(req *http.Request) string {
+	p := req.URL.Path
+	if !strings.HasPrefix(p, "/task/") {
+		return ""
+	}
+	tokens := strings.SplitN(p, "/task/", 2)
+	if len(tokens) < 2 {
+		return ""
+	}
+	a, err := arn.Parse(tokens[1])
+	if err != nil {
+		return ""
+	}
+
+	if parts := strings.SplitN(a.Resource, "/", 5); len(parts) < 2 {
+		return ""
+	} else if !strings.EqualFold("task", parts[0]) {
+		return ""
+	} else if len(parts) > 3 {
+		return ""
+	}
+	return tokens[1]
+}
+
+func (hs *Server) isProxy(req *http.Request) bool {
+	// 'can you extract a task arn from the request'
+	arn := extractArn(req)
+	if arn == "" {
+		return false
+	}
+
+	// 'is it me'
+	x, err := hs.Metadata.Self()
+	if err != nil {
+		panic("error retrieving metadata: " + err.Error())
+	}
+	if x.TaskARN == nil || *x.TaskARN == arn {
+		return false
+	}
+	return true
 }
 
 func handleUnauth(res http.ResponseWriter) {

@@ -37,6 +37,7 @@ func main() {
 	}
 	srv := &hypatia.Server{
 		Protection:       tpClient,
+		Metadata:         tpClient,
 		LocalHealth:      hypatia.FileHealthcheck{Filepath: *localfile},
 		RemoteHealth:     hypatia.FileHealthcheck{Filepath: *remotefile},
 		ServiceDiscovery: sd,

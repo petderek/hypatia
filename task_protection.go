@@ -14,9 +14,11 @@ import (
 )
 
 type TaskProtectionClient struct {
-	Location *url.URL
-	Client   *http.Client
-	_once    sync.Once
+	Location  *url.URL
+	Client    *http.Client
+	_once     sync.Once
+	_memo     sync.Once
+	_metadata *TaskMetadata
 }
 
 func (tpc *TaskProtectionClient) init() error {
@@ -39,6 +41,7 @@ func (tpc *TaskProtectionClient) init() error {
 	})
 	return err
 }
+
 func (tpc *TaskProtectionClient) Get() (*Protection, error) {
 	return tpc.doRequest(http.MethodGet, nil)
 }
@@ -56,6 +59,41 @@ func (tpc *TaskProtectionClient) Put(protect bool, min *int) (*Protection, error
 	return tpc.doRequest(http.MethodPut, bytes.NewReader(body))
 }
 
+func (tpc *TaskProtectionClient) Self() (*TaskMetadata, error) {
+	var metadata TaskMetadata
+	if tpc._metadata != nil {
+		metadata = *tpc._metadata
+		return &metadata, nil
+	}
+	if err := tpc.init(); err != nil {
+		return nil, err
+	}
+	location, ok := os.LookupEnv("ECS_CONTAINER_METADATA_URI_V4")
+	if !ok {
+		return nil, errors.New("no ECS_CONTAINER_METADATA_URI_V4 set")
+	}
+	u, err := url.Parse(location + "/task")
+	if err != nil {
+		return nil, err
+	}
+	r, err := http.Get(u.String())
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, err
+	}
+	tpc._memo.Do(func() {
+		tpc._metadata = &metadata
+	})
+	return &metadata, nil
+}
+
 func (tpc *TaskProtectionClient) doRequest(method string, body io.Reader) (*Protection, error) {
 	if err := tpc.init(); err != nil {
 		return nil, err
@@ -71,6 +109,7 @@ func (tpc *TaskProtectionClient) doRequest(method string, body io.Reader) (*Prot
 	if err != nil {
 		return nil, err
 	}
+	defer res.Body.Close()
 	raw, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
@@ -99,6 +138,12 @@ type TaskProtectionRequest struct {
 	ExpiresInMinutes  *int  `json:"ExpiresInMinutes,omitempty"`
 }
 
+type TaskMetadata struct {
+	TaskARN       *string
+	Cluster       *string
+	EC2InstanceId *string
+}
+
 type Protection struct {
 	ExpirationDate    *string
 	ProtectionEnabled *bool
@@ -125,6 +170,9 @@ func (t *TaskProtectionStub) Get() (*Protection, error) {
 	return t.Protection, nil
 }
 
+func (t *TaskProtectionStub) Self() (*TaskMetadata, error) {
+	return nil, errors.New("metadata not implemented")
+}
 func (t *TaskProtectionStub) Put(enabled bool, minutes *int) (*Protection, error) {
 	t.ProtectionEnabled = &enabled
 	if minutes != nil && *minutes > 0 {

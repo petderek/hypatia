@@ -1,21 +1,30 @@
 package hypatia
 
 import (
-	"github.com/aws/aws-sdk-go-v2/aws"
+	"net/http"
 	"testing"
 )
 
-func TestServe(t *testing.T) {
-	tpClient := &TaskProtectionStub{
-		Protection: &Protection{
-			TaskArn: aws.String("arn:aws:ecs:us-west-2:0123456789:task/foo"),
-		},
+func TestArn(t *testing.T) {
+	happyCases := []string{
+		"http://localhost/task/arn:aws:ecs:us-west-2:012:task/default/cafe",
+		"http://localhost/task/arn:aws:ecs:us-west-2:012:task/cafe",
 	}
-	srv := &Server{
-		Protection:   tpClient,
-		LocalHealth:  FileHealthcheck{Filepath: "local.status"},
-		RemoteHealth: FileHealthcheck{Filepath: "remote.status"},
-		Writeable:    true,
+	sadCases := []string{
+		"http://localhost/task/arn:cafe",
+		"http://localhost/task/arn:aws:ecs:us-west-2:012:task",
+		"http://localhost/task/arn:aws:ecs:us-west-2:012:task/cafe/cafe/cafe",
 	}
-	println(srv)
+	for i, v := range happyCases {
+		r, _ := http.NewRequest("GET", v, nil)
+		if extractArn(r) == "" {
+			t.Errorf("trial %d failed with url %s: ", i, v)
+		}
+	}
+	for i, v := range sadCases {
+		r, _ := http.NewRequest("GET", v, nil)
+		if extractArn(r) != "" {
+			t.Errorf("trial %d failed with url %s: ", i, v)
+		}
+	}
 }
